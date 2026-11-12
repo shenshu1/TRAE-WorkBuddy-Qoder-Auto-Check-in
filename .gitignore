@@ -2,3 +2,6 @@
 __pycache__/
 *.py[cod]
 *.log
+tools/node_modules/
+tools/probe_*.py
+token_sync.log

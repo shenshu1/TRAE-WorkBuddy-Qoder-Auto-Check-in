@@ -28,8 +28,8 @@
 
 | 产品 | 标准路径 | 缺失时 |
 |------|---------|-------|
-| WorkBuddy | macOS：`~/Library/Application Support/CodeBuddyExtension/Data/Public/auth/workbuddy-desktop.info`；Windows：`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info`（未命中再试 `%APPDATA%` 同级路径） | `open -a "WorkBuddy"`（Win：`start WorkBuddy`），等用户登录 |
-| TRAE | macOS：`~/Library/Application Support/TRAE SOLO CN/User/globalStorage/storage.json`；Windows：`%APPDATA%\TRAE SOLO CN\User\globalStorage\storage.json`。含 `iCubeAuthInfo` 条目 | `open -a "TRAE SOLO CN"`，等用户登录 |
+| WorkBuddy | 目录 `.../CodeBuddyExtension/Data/Public/auth/` 下含明文 `accessToken` 的 `*.info`，优先 `Tencent-Cloud.coding-copilot.info`。**5.9.2 起 `workbuddy-desktop.info` 会写成 `$wbEncrypted` 加密信封，不可直接读取** | `open -a "WorkBuddy"`（Win：`start WorkBuddy`），等用户登录 |
+| TRAE | macOS：`~/Library/Application Support/Trae CN/User/globalStorage/storage.json`（合并升级后的新路径，优先）；旧版为 `TRAE SOLO CN`。两者均含 `iCubeAuthInfo` 条目。Windows：`%APPDATA%\Trae CN\User\globalStorage\storage.json` | `open -a "Trae CN"`（旧版：`TRAE SOLO CN`），等用户登录 |
 
 3. `gh auth status`；未登录执行 `gh auth login`
 
@@ -38,16 +38,23 @@
 1. `gh repo fork <本仓库地址> --clone`（TRAE 需本地克隆，提取工具在 `tools/decrypt_trae_token.py`）
 2. 提取凭证（macOS 用 `python3`，Windows 用 `python`）：
 
-   WorkBuddy：
+   **推荐直接跑仓库自带脚本**，一次性读取三份 token 并写入 Secrets（详见第三章）：
    ```bash
-   python -c "import json; d=json.load(open(r'<登录态检查定位到的实际路径>')); print('WORKBUDDY_ACCESS_TOKEN='+d['auth']['accessToken']); print('WORKBUDDY_UID='+d['account']['uid'])"
+   cd <克隆目录> && ./tools/sync_tokens.sh
+   ```
+
+   需要单独取值时：
+
+   WorkBuddy（注意读 `coding-copilot` 文件，不要读 `workbuddy-desktop.info`）：
+   ```bash
+   python3 -c "import json; d=json.load(open('<auth目录>/Tencent-Cloud.coding-copilot.info')); print('WORKBUDDY_ACCESS_TOKEN='+d['auth']['accessToken'])"
    ```
 
    TRAE：
    ```bash
-   python <克隆目录>/tools/decrypt_trae_token.py --stdout    # TRAE_JWT
+   python3 <克隆目录>/tools/decrypt_trae_token.py --stdout    # TRAE_JWT
    ```
-   `TRAE_DEVICE_ID`：在 `~/Library/Application Support/TRAE SOLO CN/logs/<日期目录>/sharedprocess.log`（Windows：`%APPDATA%\TRAE SOLO CN\logs\`）搜 `"deviceId":"数字串"`；搜不到则全盘搜 `deviceId` 或询问用户
+   `TRAE_DEVICE_ID`：在 `~/Library/Application Support/Trae CN/logs/<日期目录>/sharedprocess.log`（旧版为 `TRAE SOLO CN`；Windows：`%APPDATA%\Trae CN\logs\`）搜 `"deviceId":"数字串"`；搜不到则全盘搜 `deviceId` 或询问用户
 
 3. 写入 Secrets：
    ```bash
@@ -120,7 +127,7 @@
    }
    ```
 
-   每个产品两个任务：主签 10:13 / 10:23，兜底 16:07 / 16:17。JSON 写入脚本文件执行。
+   每个产品两个任务：主签 10:13 / 10:23 / 10:33，兜底 16:07 / 16:17 / 16:33（依次为 WorkBuddy / TRAE / Qoder）。JSON 写入脚本文件执行。
 
 ### 验收
 
@@ -139,21 +146,32 @@
 
 ## 三、token 自动同步（macOS）
 
-### 生成内容
+仓库已提供 `tools/sync_tokens.sh`，无需自行编写。它会依次读取 WorkBuddy / TRAE / Qoder 的本地登录态，校验 JWT 是否过期，再推送到 Secrets。
 
-1. `sync_tokens.sh`：
-   - `unset PYTHONHOME PYTHONPATH`
-   - 读 WorkBuddy token（路径见第一章前置确认）
-   - `python3 <项目目录>/tools/decrypt_trae_token.py --stdout` 取 TRAE token
-   - `printf '%s' "$TOKEN" | gh secret set <名称> --repo <用户名>/<仓库>`
-   - 输出追加 `token_sync.log`，带时间戳；失败仅记日志不重试，未读到 token 记 ERROR 退出
-   - 需代理时 export `HTTPS_PROXY`/`HTTP_PROXY`
-2. `~/Library/LaunchAgents/com.token-sync.daily.plist`：`StartCalendarInterval` 每日 09:30，`/bin/bash` 执行
-3. `launchctl bootstrap gui/$(id -u) <plist路径>`
+### 使用
+
+```bash
+cd <克隆目录>
+./tools/sync_tokens.sh                 # 目标仓库从 git remote 推导
+GH_REPO=owner/repo ./tools/sync_tokens.sh   # 或显式指定
+```
+
+可选环境变量：`PYTHON_BIN`、`NODE_BIN`、`WB_AUTH_DIR`、`HTTPS_PROXY`。WorkBuddy 单点登录态读不到时，若客户端带 `--remote-debugging-port=9222` 运行，会回退到 CDP 取值（`tools/extract_workbuddy_token_cdp.js`，需 Node 22+，无需 npm install）。
+
+脚本行为：
+
+- 输出追加到仓库根目录 `token_sync.log`，带时间戳；日志不含 token 值
+- 任一来源读取失败只记 `ERROR`，不重试
+- 目标仓库未设置且无法从 remote 推导时，直接报错退出
+
+### 定时执行
+
+1. 新建 `~/Library/LaunchAgents/com.token-sync.daily.plist`，`StartCalendarInterval` 设为每日 09:30，`ProgramArguments` 为 `/bin/bash` + 脚本绝对路径
+2. `launchctl bootstrap gui/$(id -u) <plist路径>`
 
 ### 验收
 
-- 手动执行一次，Secrets 更新，日志含"已更新（N 字符）"
+- 手动执行一次，日志出现三条"已更新（N 字符）"
 - `launchctl list | grep token-sync` 有任务
 - 日志不含 token 值
 
@@ -169,11 +187,14 @@
 
 ## 四、token 自动同步（Windows）
 
-### 生成内容
+> **本仓库暂未提供 Windows 现成脚本**（仅 macOS 版经过实际验证）。以下步骤沿用同名逻辑自行实现；WorkBuddy 同样需避开采 `workbuddy-desktop.info` 的加密信封。
+
+### 实现要点
 
 1. `sync_tokens.ps1`：
-   - 读 WorkBuddy token：`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\workbuddy-desktop.info`（未命中再试 `%APPDATA%` 同级路径）
+   - 读 WorkBuddy token：`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\` 下含明文 `accessToken` 的 `*.info`（优先 `Tencent-Cloud.coding-copilot.info`，未命中再试 `%APPDATA%` 同级路径）
    - `python tools/decrypt_trae_token.py --stdout` 取 TRAE token（路径不同加 `--storage`）
+   - 校验 JWT `exp`，过期则跳过
    - `gh secret set <名称> --repo <用户名>/<仓库>`（stdin 传入）
    - 写 `token_sync.log`；失败仅记录不重试，未读到 token 记 ERROR 退出
 2. `schtasks /create /sc daily` 每日 09:30 执行
